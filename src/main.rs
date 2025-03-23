@@ -3,8 +3,14 @@ use std::error::Error;
 
 pub mod camera_driver;
 use camera_driver::pic_record;
+use env_logger;
+use log::info;
 
 fn main() -> Result<(), Box<dyn Error>> {
+    env_logger::builder()
+        .filter_level(log::LevelFilter::Error)
+        .init();
+    info!("Start");
     pic_record();
     // dora_node_init()?;
 

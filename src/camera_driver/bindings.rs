@@ -2089,7 +2089,8 @@ extern "C" {
     /// brief 获取一帧图像(同步获取帧数据机制)
     /// param handle [IN] 设备句柄
     /// param pFrame [OUT] 帧数据信息
-    /// param timeoutMS [IN] 获取一帧图像的超时时间,INFINITE时表示无限等待,直到收到一帧数据或者停止取流。单位是毫秒
+    /// param timeoutMS [IN] 获取一帧图像的超时时间
+    /// INFINITE时表示无限等待,直到收到一帧数据或者停止取流。单位是毫秒
     /// return 成功，返回IMV_OK；错误，返回错误码
     /// remakes
     /// 该接口不支持多线程调用。

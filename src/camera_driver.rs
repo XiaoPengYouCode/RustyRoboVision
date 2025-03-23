@@ -1,6 +1,8 @@
 mod bindings;
 mod safe_impl;
 
+use log::{error, info};
+use once_cell::sync::Lazy;
 use std::{
     alloc::{alloc, dealloc, Layout},
     collections::VecDeque,
@@ -13,10 +15,10 @@ use std::{
     time::Duration,
 };
 
-use once_cell::sync::Lazy;
-
 use bindings::*;
-use safe_impl::{ImvFrameTs, ImvHandleTs};
+use safe_impl::{
+    display_device_info, get_cam_param, get_statisitic_info, set_cam_param, ImvFrameTs, ImvHandleTs,
+};
 
 // 使用 once_cell 替代 lazy_static，功能类似但更现代
 static FRAME_QUEUE: Lazy<Mutex<FrameQueue>> = Lazy::new(|| {
@@ -67,9 +69,9 @@ impl FrameQueue {
 // 数据帧回调函数
 #[no_mangle]
 unsafe extern "C" fn get_frame(p_frame: *mut IMV_Frame, _p_user: *mut c_void) {
-    // println!("收到帧");
+    // info!("收到帧");
     if p_frame.is_null() {
-        println!("错误：收到空帧指针");
+        info!("错误：收到空帧指针");
         return;
     }
 
@@ -78,13 +80,13 @@ unsafe extern "C" fn get_frame(p_frame: *mut IMV_Frame, _p_user: *mut c_void) {
     match FRAME_QUEUE.lock() {
         Ok(mut queue) => {
             if queue.push(frame) {
-                println!("帧已添加到队列，当前队列长度：{}", queue.len());
+                info!("帧已添加到队列，当前队列长度：{}", queue.len());
             } else {
-                println!("队列已满，丢弃帧");
+                error!("队列已满，丢弃帧");
             }
         }
         Err(e) => {
-            println!("获取队列锁失败：{:?}", e);
+            error!("获取队列锁失败：{:?}", e);
         }
     }
 }
@@ -129,19 +131,23 @@ fn process_frame(handle_contain: ImvHandleTs, running: Arc<Mutex<bool>>) {
                     nDstDataLen: 8,
                     nReserved: [0; 8],
                 };
-                let return_val = IMV_PixelConvert(handle_contain.handle(), &mut convert_param);
-                if return_val != IMV_OK as i32 {
-                    println!("Failed to convert pixel type");
+                let ret_val = IMV_PixelConvert(handle_contain.handle(), &mut convert_param);
+                if ret_val != IMV_OK as i32 {
+                    info!("Failed to convert pixel type");
                 }
 
                 frame.frame.frameInfo.pixelFormat = IMV_EPixelType::gvspPixelRGB8;
                 frame.frame.pData = ptr;
                 // Todo: Release pData
 
-                let path = format!("./Dahua/{}.jpg", frame.frame.frameInfo.blockId);
+                if frame.frame.frameInfo.blockId % 10 == 0 {
+                    get_statisitic_info(&handle_contain).unwrap();
+                }
+
+                let path = format!("./photos/{}.jpg", frame.frame.frameInfo.blockId);
                 let cpath = CString::from_str(&path).expect("Failed to convert path to CString");
                 File::create(path).expect("Failed to create file");
-                let return_val = IMV_SaveImageToFile(
+                let ret_val = IMV_SaveImageToFile(
                     handle_contain.handle(),
                     &mut IMV_SaveImageToFileParam {
                         nWidth: frame.width(),
@@ -156,8 +162,8 @@ fn process_frame(handle_contain: ImvHandleTs, running: Arc<Mutex<bool>>) {
                         nReserved: [0; 8],
                     },
                 );
-                if return_val != IMV_OK as i32 {
-                    println!("Failed to save image, Error[{}]", return_val);
+                if ret_val != IMV_OK as i32 {
+                    info!("Failed to save image, Error[{}]", ret_val);
                 }
 
                 if !frame.frame.frameHandle.is_null() {
@@ -168,7 +174,7 @@ fn process_frame(handle_contain: ImvHandleTs, running: Arc<Mutex<bool>>) {
             }
         }
     }
-    println!("处理帧线程退出");
+    info!("处理帧线程退出");
 }
 
 pub fn pic_record() {
@@ -181,14 +187,14 @@ pub fn pic_record() {
     let device_0 = unsafe {
         let device_ptr = device_info_list.pDevInfo;
         if device_ptr.is_null() {
-            eprintln!("错误：设备指针为空");
+            error!("错误：设备指针为空");
             return;
         }
 
         match device_ptr.as_ref() {
             Some(dev) => dev,
             None => {
-                eprintln!("错误：无法解引用设备指针");
+                error!("错误：无法解引用设备指针");
                 return;
             }
         }
@@ -201,21 +207,25 @@ pub fn pic_record() {
             let mut camera_index: c_uint = 0;
             let camera_index_ptr = &mut camera_index as *mut std::os::raw::c_uint as *mut c_void;
             let mut handle: IMV_HANDLE = std::ptr::null_mut();
-            let return_value = IMV_CreateHandle(
+            let ret_val = IMV_CreateHandle(
                 &mut handle as *mut IMV_HANDLE,
                 IMV_ECreateHandleMode::modeByIndex,
                 camera_index_ptr,
             );
-            if return_value != IMV_OK as i32 {
-                panic!("错误 {return_value}");
+            if ret_val != IMV_OK as i32 {
+                error!("Create Handle error, Error Code[{ret_val}]");
             }
-            let handle_container = ImvHandleTs::new(handle);
+            let mut handle_container = ImvHandleTs::new(handle);
+
             IMV_Open(handle);
 
             // 清空帧队列，确保干净状态开始
             if let Ok(mut queue) = FRAME_QUEUE.lock() {
                 queue.clear();
             }
+
+            get_cam_param(&mut handle_container).unwrap();
+            set_cam_param(&mut handle_container).unwrap();
 
             // 创建线程控制标志
             let running = Arc::new(Mutex::new(true));
@@ -228,26 +238,26 @@ pub fn pic_record() {
 
             // 注册数据帧回调函数
             let null_ptr: *const i32 = std::ptr::null();
-            let return_value = IMV_AttachGrabbing(handle, Some(get_frame), null_ptr as *mut c_void);
-            if return_value != IMV_OK as i32 {
-                println!("附加采集回调失败！错误码[{}]", return_value);
+            let ret_val = IMV_AttachGrabbing(handle, Some(get_frame), null_ptr as *mut c_void);
+            if ret_val != IMV_OK as i32 {
+                error!("附加采集回调失败！错误码[{}]", ret_val);
                 break;
             }
 
             // 开始拉流
-            let return_value = IMV_StartGrabbing(handle);
-            if IMV_OK as i32 != return_value {
-                println!("开始采集失败！错误码[{}]", return_value);
+            let ret_val = IMV_StartGrabbing(handle);
+            if IMV_OK as i32 != ret_val {
+                error!("开始采集失败！错误码[{}]", ret_val);
                 break;
             }
 
             // 采集
-            sleep(Duration::from_secs(1));
+            sleep(Duration::from_millis(1000));
 
             // 停止拉流
-            let return_value = IMV_StopGrabbing(handle);
-            if IMV_OK as i32 != return_value {
-                println!("停止采集失败！错误码[{}]", return_value);
+            let ret_val = IMV_StopGrabbing(handle);
+            if IMV_OK as i32 != ret_val {
+                error!("停止采集失败！错误码[{}]", ret_val);
                 break;
             }
 
@@ -258,52 +268,26 @@ pub fn pic_record() {
 
             // 等待处理线程结束
             if let Err(e) = process_thread.join() {
-                println!("等待处理线程结束时出错：{:?}", e);
+                info!("等待处理线程结束时出错：{:?}", e);
             }
 
             // 显示队列中剩余的帧数量
             if let Ok(queue) = FRAME_QUEUE.lock() {
-                println!("队列中剩余帧数：{}", queue.len());
+                info!("队列中剩余帧数：{}", queue.len());
             }
 
             // 关闭相机
-            let return_value = IMV_Close(handle);
-            if return_value != IMV_OK as i32 {
-                panic!("关闭相机失败");
+            let ret_val = IMV_Close(handle);
+            if ret_val != IMV_OK as i32 {
+                error!("关闭相机失败");
             }
             if !handle.is_null() {
                 IMV_DestroyHandle(handle);
-                println!("销毁相机句柄");
+                info!("销毁相机句柄");
             }
 
-            println!("退出\n");
+            info!("退出\n");
             break;
         }
     }
-}
-
-fn display_device_info(device_info: &IMV_DeviceInfo) {
-    println!("Vendor: {}", trsnsfer_i8_to_string(&device_info.vendorName));
-    match device_info.nCameraType {
-        0 => println!("Camera type: GigE"),
-        1 => println!("Camera type: U3V"),
-        2 => println!("Camera type: CameraLink"),
-        3 => println!("Camera type: CameraSimulator"),
-        _ => println!("Camera type: Unknown"),
-    }
-    println!("Model: {}", trsnsfer_i8_to_string(&device_info.modelName));
-    println!(
-        "Serial number: {}",
-        trsnsfer_i8_to_string(&device_info.serialNumber)
-    );
-}
-
-fn trsnsfer_i8_to_string(i8_array: &[i8]) -> String {
-    let mut result = String::new();
-    for i in i8_array.iter().take(256) {
-        if *i != 0 {
-            result.push(*i as u8 as char);
-        }
-    }
-    result
 }
